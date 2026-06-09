@@ -112,7 +112,6 @@ class MembershipController extends Controller
     }
 
     // PEMBELIAN USER
-
     // lihat membership user yg login
     public function myMembership(Request $request)
     {
@@ -146,7 +145,7 @@ class MembershipController extends Controller
         $membership = Membership::findOrFail($request->membership_id);
         $user = $request->user();
 
-        // Cek user sudah punya membership aktif?
+        // Cek membership aktif
         $existingMembership = UserMembership::where('user_id', $user->user_id)
             ->where('status', 'active')
             ->where('end_date', '>=', now())
@@ -162,15 +161,10 @@ class MembershipController extends Controller
         DB::beginTransaction();
 
         try {
-            // Hitung tanggal expired
             $startDate = now();
             $endDate = now()->addDays($membership->duration_days);
-
-            // remaining class (null = unlimited)
             $remainingClass = $membership->class_limit;
 
-            // Buat user membership dengan status active dulu
-            // Tapi nanti di webhook kalau payment gagal, akan dihapus
             $userMembership = UserMembership::create([
                 'user_id' => $user->user_id,
                 'membership_id' => $membership->membership_id,
@@ -180,7 +174,6 @@ class MembershipController extends Controller
                 'status' => 'active',
             ]);
 
-            // Buat payment record (pending)
             $payment = Payment::create([
                 'user_id' => $user->user_id,
                 'booking_id' => null,
@@ -191,38 +184,49 @@ class MembershipController extends Controller
                 'payment_date' => null,
             ]);
 
+            // Generate payment token langsung (tanpa panggil controller lain)
+            \Midtrans\Config::$serverKey = config('midtrans.server_key');
+            \Midtrans\Config::$isProduction = config('midtrans.is_production');
+            \Midtrans\Config::$isSanitized = true;
+            \Midtrans\Config::$is3ds = true;
+
+            $orderId = 'MEM-' . $userMembership->user_membership_id . '-' . time();
+            $transactionDetails = [
+                'order_id' => $orderId,
+                'gross_amount' => (int) $membership->price,
+            ];
+            $customerDetails = [
+                'first_name' => $user->name,
+                'email' => $user->email,
+            ];
+            $params = [
+                'transaction_details' => $transactionDetails,
+                'customer_details' => $customerDetails,
+            ];
+
+            $snap = \Midtrans\Snap::createTransaction($params);
+            $paymentToken = $snap->token;
+            $paymentUrl = $snap->redirect_url;
+
+            // Update payment dengan token
+            $payment->update([
+                'payment_token' => $paymentToken,
+                'payment_url' => $paymentUrl,
+                'order_id' => $orderId,
+            ]);
+
             DB::commit();
 
-            // INTEGRASI MIDTRANS
-            $paymentController = app(PaymentController::class);
-            $paymentRequest = new Request();
-            $paymentResponse = $paymentController->createMembershipPayment($paymentRequest, $userMembership->user_membership_id);
-
-            $responseData = $paymentResponse->getData();
-
-            if ($responseData->success) {
-                return response()->json([
-                    'success' => true,
-                    'message' => 'Silakan lakukan pembayaran untuk mengaktifkan membership',
-                    'data' => [
-                        'user_membership' => $userMembership->load('membership'),
-                        'payment' => $payment,
-                        'payment_token' => $responseData->data->token,
-                        'payment_url' => $responseData->data->payment_url,
-                    ],
-                ], 201);
-            } else {
-                // Kalau gagal generate payment, hapus user membership
-                DB::beginTransaction();
-                $userMembership->delete();
-                $payment->delete();
-                DB::commit();
-
-                return response()->json([
-                    'success' => false,
-                    'message' => 'Gagal memproses pembayaran: ' . ($responseData->message ?? 'Unknown error'),
-                ], 500);
-            }
+            return response()->json([
+                'success' => true,
+                'message' => 'Silakan lakukan pembayaran untuk mengaktifkan membership',
+                'data' => [
+                    'user_membership' => $userMembership->load('membership'),
+                    'payment' => $payment,
+                    'payment_token' => $paymentToken,
+                    'payment_url' => $paymentUrl,
+                ],
+            ], 201);
         } catch (\Exception $e) {
             DB::rollBack();
             return response()->json([

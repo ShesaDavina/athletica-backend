@@ -263,7 +263,7 @@ class ScheduleController extends Controller
         }
 
         $attendances = $query->orderBy('created_at', 'desc')->paginate(15);
-        // Transform data
+
         $attendances->getCollection()->transform(function ($booking) {
             return [
                 'booking_id' => $booking->booking_id,
@@ -271,7 +271,7 @@ class ScheduleController extends Controller
                 'user_email' => $booking->user->email,
                 'booking_type' => $booking->booking_type,
                 'status' => $booking->status,
-                'class_name' => $booking->schedule->class->class_name,
+                'class_name' => $booking->schedule->class?->class_name ?? 'Kelas tidak tersedia',
                 'schedule_date' => $booking->schedule->schedule_date,
                 'start_time' => \Carbon\Carbon::parse($booking->schedule->start_time)->format('H:i'),
                 'end_time' => \Carbon\Carbon::parse($booking->schedule->end_time)->format('H:i'),
